@@ -1,0 +1,373 @@
+---
+title: "Stroke Dataset"
+subtitle: " Building and evaluating a prediction model"
+author: "Sivakamakshi Muthu Kumarasamy, ID = 25240080"
+date: "`r format(Sys.Date(), '%d %B %Y')`"
+output:
+  html_document:
+    theme: flatly
+    highlight: tango
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    df_print: kable
+    fig_width: 8
+    fig_height: 5
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+```{r message=FALSE, warning=FALSE}
+library(tidyverse)
+library(table1)
+library(dplyr)
+library(plotly)
+library(caret)
+library(pROC)
+library(randomForest)
+library(gbm)
+library(PRROC)
+library(dcurves)
+library(patchwork)
+library(kableExtra)
+library(scales)
+library(MASS)
+library(rpart)
+library(rpart.plot)
+library(pROC)
+library(e1071)
+library(tree)
+library(BART)
+
+```
+
+## Prediction Goal
+
+
+## Dataset
+
+Dataset: Stroke Prediction Dataset
+
+Source: https://www.kaggle.com/datasets/fedesoriano/stroke-prediction-dataset?resource=download
+
+The study design is cross-sectional with adult patients with demographic, clinical and lifestyle characteristics.
+
+
+## Data loading and Pre-processing
+
+```{r}
+
+set.seed(123)
+stroke <- read.csv("stroke dataset.csv",
+                   stringsAsFactors = FALSE,
+                   na.strings = c("NA", "N/A", "", " "))
+
+stroke <- stroke %>%
+  filter(gender != "Other") %>%
+  dplyr::select(-id) %>%
+  mutate(
+    bmi            = as.numeric(ifelse(bmi == "N/A", NA, bmi)),
+    bmi            = ifelse(is.na(bmi), median(bmi, na.rm = TRUE), bmi),
+    stroke         = factor(stroke, levels = c(0, 1), labels = c("No", "Yes")),
+    gender         = factor(gender),
+    ever_married   = factor(ever_married),
+    work_type      = factor(work_type),
+    Residence_type = factor(Residence_type),
+    smoking_status = factor(smoking_status),
+    hypertension   = factor(hypertension),
+    heart_disease  = factor(heart_disease)
+  )
+```
+
+```{r}
+names(stroke)
+```
+```{r}
+summary(stroke)
+```
+
+```{r}
+colSums(is.na(stroke))
+```
+
+```{r}
+n_stroke <- sum(stroke$stroke == "Yes")
+n_stroke
+```
+
+```{r}
+male <- sum(stroke$gender == "Male")
+female <- sum(stroke$gender == "Female")
+
+male
+female
+```
+## Exploratory Visualisation
+
+```{r}
+#Age distribution by Stroke status
+
+age_plot <- ggplot(stroke, aes(x = age, fill = stroke)) +
+  geom_histogram(bins = 40, alpha = 0.75, position = "identity") +
+  labs(title = "Age distribution by Stroke status", x = "Age", y = "Count", fill = "Stroke") + 
+  theme_minimal()
+
+# Stroke status by average glucose levels
+glucose_plot <- ggplot(stroke, aes(x = avg_glucose_level, fill = stroke)) +
+  geom_histogram(bins = 40, alpha = 0.75, position = "identity") +
+  labs(title = "Stroke status by average glucose levels", x = "Average glucose levels", y = "Count", fill = "Stroke") + 
+  theme_minimal()
+
+
+# Stroke rate by BMI category
+bmi_plot <- ggplot(stroke, aes(x = stroke, y = bmi, fill  = stroke)) +
+  geom_boxplot() +
+  labs(title = "Stroke status by BMI levels", x = "Stroke", y = "BMI", fill = "Stroke") +
+  theme_minimal()
+
+#Stroke rate by heart disease
+
+heart_plot <- stroke %>%
+  count(heart_disease, stroke) %>%
+  group_by(heart_disease) %>%
+  mutate(proportion = n / sum(n)) %>%
+  filter(stroke == "Yes") %>%
+  ggplot(aes(x = heart_disease, y = proportion, fill = heart_disease)) +
+  geom_col() +
+  scale_y_continuous(labels = percent_format())+
+  labs(title  = "Stroke status by heart diseases", x = "Heart Disease  0 = No, 1 = Yes", y = "Stroke", fill = "Stroke") +
+  theme_minimal()
+
+#Stroke status by hypertension
+  
+htn_plot <- stroke%>%
+  count(hypertension, stroke) %>%
+  group_by(hypertension) %>%
+  mutate(proportion = n / sum(n)) %>%
+  filter(stroke == "Yes") %>%
+  ggplot(aes(x = hypertension, y = proportion, fill = hypertension)) +
+  geom_col()+
+  scale_y_continuous(labels = percent_format())+
+  labs(title = "Stroke status by hypertension", x = "Hypertension 0 = No, 1 = Yes", y = "Stroke", fill = "Stroke")+
+  theme_minimal()
+
+(age_plot | glucose_plot) /  bmi_plot / (heart_plot | htn_plot)
+```
+
+## Cross-validation
+
+```{r}
+# Considering 70% trainig data
+
+set.seed(123)
+n           <- nrow(stroke)
+train_index <- sample(1:n, size = 0.7 * n)
+train       <- stroke[train_index, ]
+test        <- stroke[-train_index, ]
+
+cat("Training set size:", nrow(train), "\n")
+cat("Test set size:",     nrow(test),  "\n")
+
+test_actual <- factor(test$stroke, levels = c("No", "Yes"))
+
+cat("Training set stroke prevalence:", round(mean(train$stroke == "Yes")*100, 2), "%\n")
+cat("Test set stroke prevalence:", round(mean(test$stroke == "Yes")*100, 2), "%\n")
+```
+
+
+
+## Logistic Regression model using only the observations of training set
+
+```{r}
+log_model <- glm(stroke ~., data = train, family = binomial)
+
+summary(log_model)
+
+```
+
+```{r}
+# Prediction
+
+log_pred <- predict(log_model, newdata = test, type = "response")
+log_pred_class <- factor(ifelse(log_pred > 0.5, "Yes", "No"), levels = c("No", "Yes"))
+test_actual <- factor(test$stroke, levels = c("No", "Yes"))
+
+
+confusionMatrix(log_pred_class, test_actual, positive = "Yes")
+roc_curve <- roc(test$stroke, log_pred)
+plot(roc_curve, col = "steelblue", main = "ROC Curve - Logistic Regression")
+auc_full <- cat("AUC (logistic):", round(auc(roc_curve), 3), "\n")
+
+```
+
+```{r}
+# Variable Selection
+
+step_model <- stepAIC(log_model, direction = "both",trace = FALSE)
+summary(step_model)
+```
+
+```{r}
+AIC(log_model, step_model)
+```
+
+```{r}
+# Predictions
+step_pred <- predict(step_model, newdata = test, type = "response")
+step_pred_class <- factor(ifelse(step_pred > 0.5, "Yes", "No"), levels = c("No", "Yes"))
+test_actual <- factor(test$stroke, levels = c("No", "Yes"))
+
+# Confusion Matrix
+confusionMatrix(step_pred_class, test_actual, positive = "Yes")
+
+# ROC and AUC
+roc_step <- roc(ifelse(test_actual=="Yes",1,0), step_pred)
+plot(roc_step, col="steelblue", main="ROC Curve - Stepwise Logistic Regression")
+auc_step <- cat("AUC (stepwise):", round(auc(roc_step), 3), "\n")
+```
+
+```{r}
+
+step_varimp <- varImp(step_model, scale = TRUE)
+step_varimp_df <- as.data.frame(step_varimp)
+step_varimp_df$Variable <- rownames(step_varimp_df)
+rownames(step_varimp_df) <- NULL
+
+imp_col <- names(step_varimp_df)[1]
+step_varimp_df <- step_varimp_df %>% arrange(desc(.data[[imp_col]]))
+
+step_varimp_df %>% kable(caption = "Variable Importance - Stepwise Logistic Regression")
+
+
+ggplot(step_varimp_df, aes(x = reorder(Variable, .data[[imp_col]]), y = .data[[imp_col]])) +
+  geom_col(fill = "steelblue") +
+  coord_flip() +
+  labs(title = "Variable Importance - Stepwise Logistic Regression",
+       x = "Variable",
+       y = "Importance (scaled)") +
+  theme_minimal()
+```
+
+```{r}
+set.seed(123)
+tree_model <- rpart(
+  stroke ~ .,
+  data    = train,
+  method  = "class",
+  control = rpart.control(cp = 0.0001, minsplit = 5, minbucket = 2)
+)
+printcp(tree_model)
+plotcp(tree_model)
+
+```
+```{r}
+set.seed(123)
+rf_model <- randomForest(
+  stroke ~ .,
+  data       = train,
+  ntree      = 200,
+  importance = TRUE
+)
+
+print(rf_model)
+
+# Predictions
+rf_pred <- predict(rf_model, newdata = test)
+rf_prob <- predict(rf_model, newdata = test, type = "prob")[,2]
+
+# Confusion Matrix
+confusionMatrix(rf_pred, test$stroke, positive = "Yes")
+confusionMatrix(factor(log_pred_class), test$stroke, positive = "Yes")
+
+# ROC and AUC
+roc_rf <- roc(ifelse(test$stroke=="Yes",1,0), rf_prob)
+plot(roc_rf, col="darkgreen", main="ROC Curve - Random Forest")
+auc_rf <- auc(roc_rf)
+cat("AUC for Random Forest:", round(auc_rf,3), "\n")
+
+
+varImpPlot(rf_model, main="Variable Importance - Random Forest")
+
+```
+
+```{r}
+best_cp     <- tree_model$cptable[which.min(tree_model$cptable[, "xerror"]), "CP"]
+tree_pruned <- prune(tree_model, cp = best_cp)
+
+```
+```{r}
+tree_prob <- predict(tree_model, test, type = "prob")[, "Yes"]
+
+tree_class <- factor(ifelse(tree_prob > 0.5, "Yes", "No"), levels = c("No", "Yes"))
+
+confusionMatrix(tree_class, test_actual, positive = "Yes")
+
+
+roc_tree <- roc(test$stroke, tree_prob)
+auc_tree <- cat("AUC:", round(auc(roc_tree), 3), "\n") 
+plot(roc_tree, col = "darkorange", main = "ROC – Decision Tree")
+
+```
+
+```{r}
+plot(roc_curve,  col = "steelblue",   lwd = 2,
+     main = "ROC comparison – all models")
+plot(roc_step, col = "dodgerblue",  lwd = 2, lty = 2, add = TRUE)
+plot(roc_tree, col = "darkorange",  lwd = 2, add = TRUE)
+plot(roc_rf,   col = "forestgreen", lwd = 2, add = TRUE)
+abline(a = 0, b = 1, lty = 3, col = "grey60")
+
+legend("bottomright", bty = "n",
+       legend = c(
+         paste("Logistic (full)     AUC =", round(auc(roc_curve),  3)),
+         paste("Logistic (stepwise) AUC =", round(auc(roc_step), 3)),
+         paste("Decision tree       AUC =", round(auc(roc_tree), 3)),
+         paste("Random forest       AUC =", round(auc(roc_rf),   3))
+         ),
+       col = c("steelblue","dodgerblue","darkorange","forestgreen","purple"),
+       lwd = 2)
+
+```
+```{r}
+model_summary <- data.frame(
+  Model = c("Logistic Full", "Logistic Stepwise", "Decision Tree", "Random Forest"),
+  AUC = c(auc_full, auc_step, auc_tree, auc_rf)
+)
+print(model_summary)
+```
+
+#Complete Tree Analysis
+
+```{r}
+table(stroke$stroke)
+set.seed(123)
+```
+
+
+```{r}
+tree.stroke <- tree(stroke ~., data = stroke)
+
+tree.stroke.train <- tree(stroke ~., data = train)
+
+print("Tree Summary")
+summary(tree.stroke.train)
+
+plot(tree.stroke.train)
+text(tree.stroke.train, pretty = 0)
+
+
+#Predictions
+
+tree.pred <- predict(tree.stroke.train, test, type = "class")
+table(tree.pred, test$stroke)
+mean(tree.pred != test$stroke)
+```
+
+
+```{r}
+#CV pruning
+
+
+
+```
