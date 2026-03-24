@@ -5,14 +5,10 @@ author: "Sivakamakshi Muthu Kumarasamy, ID = 25240080"
 date: "`r format(Sys.Date(), '%d %B %Y')`"
 output:
   html_document:
-    theme: flatly
-    highlight: tango
     toc: true
     toc_float: true
-    toc_depth: 3
-    df_print: kable
-    fig_width: 8
-    fig_height: 5
+    theme: flatly
+    highlight: tango
 ---
 
 ```{r setup, include=FALSE}
@@ -35,11 +31,10 @@ library(scales)
 library(MASS)
 library(rpart)
 library(rpart.plot)
-library(pROC)
 library(e1071)
 library(tree)
 library(BART)
-
+library(ROSE) 
 ```
 
 ## Prediction Goal
@@ -54,7 +49,7 @@ Source: https://www.kaggle.com/datasets/fedesoriano/stroke-prediction-dataset?re
 The study design is cross-sectional with adult patients with demographic, clinical and lifestyle characteristics.
 
 
-## Data loading and Pre-processing
+## Dataset and Pre-processing
 
 ```{r}
 
@@ -67,8 +62,8 @@ stroke <- stroke %>%
   filter(gender != "Other") %>%
   dplyr::select(-id) %>%
   mutate(
-    bmi            = as.numeric(ifelse(bmi == "N/A", NA, bmi)),
-    bmi            = ifelse(is.na(bmi), median(bmi, na.rm = TRUE), bmi),
+    bmi            = as.numeric(bmi),
+   bmi = ave(bmi, stroke, FUN = function(x) ifelse(is.na(x), median(x, na.rm=TRUE), x)),
     stroke         = factor(stroke, levels = c(0, 1), labels = c("No", "Yes")),
     gender         = factor(gender),
     ever_married   = factor(ever_married),
@@ -158,7 +153,7 @@ htn_plot <- stroke%>%
 ## Cross-validation
 
 ```{r}
-# Considering 70% trainig data
+# Train/test split
 
 set.seed(123)
 n           <- nrow(stroke)
@@ -174,13 +169,21 @@ test_actual <- factor(test$stroke, levels = c("No", "Yes"))
 cat("Training set stroke prevalence:", round(mean(train$stroke == "Yes")*100, 2), "%\n")
 cat("Test set stroke prevalence:", round(mean(test$stroke == "Yes")*100, 2), "%\n")
 ```
+```{r}
+set.seed(123)
+
+train_bal <- ovun.sample(stroke ~ ., data = train, method = "both")$data
+
+cat("Balanced training set stroke prevalence:",
+    round(mean(train_bal$stroke == "Yes") * 100, 2), "%\n")
+
+```
 
 
-
-## Logistic Regression model using only the observations of training set
+## Logistic Regression  - Full Model
 
 ```{r}
-log_model <- glm(stroke ~., data = train, family = binomial)
+log_model <- glm(stroke ~., data = train_bal, family = binomial)
 
 summary(log_model)
 
@@ -190,14 +193,22 @@ summary(log_model)
 # Prediction
 
 log_pred <- predict(log_model, newdata = test, type = "response")
-log_pred_class <- factor(ifelse(log_pred > 0.5, "Yes", "No"), levels = c("No", "Yes"))
-test_actual <- factor(test$stroke, levels = c("No", "Yes"))
+
+roc_curve <- roc(test$stroke, log_pred)
+
+best_thresh_log <- coords(roc_curve, "best", ret = "threshold")$threshold
+
+log_pred_class <- factor(ifelse(log_pred > best_thresh_log, "Yes", "No"),
+                          levels = c("No", "Yes"))
 
 
 confusionMatrix(log_pred_class, test_actual, positive = "Yes")
-roc_curve <- roc(test$stroke, log_pred)
+
 plot(roc_curve, col = "steelblue", main = "ROC Curve - Logistic Regression")
-auc_full <- cat("AUC (logistic):", round(auc(roc_curve), 3), "\n")
+
+auc_full <- auc(roc_curve)
+
+cat("AUC (logistic):", round(auc_full, 3), "\n")
 
 ```
 
@@ -214,20 +225,28 @@ AIC(log_model, step_model)
 
 ```{r}
 # Predictions
+
 step_pred <- predict(step_model, newdata = test, type = "response")
+
+roc_step <- roc(test$stroke, step_pred)
+
+best_step_thresh <- coords(roc_step, "best", ret="threshold")$threshold
+
 step_pred_class <- factor(ifelse(step_pred > 0.5, "Yes", "No"), levels = c("No", "Yes"))
-test_actual <- factor(test$stroke, levels = c("No", "Yes"))
 
 # Confusion Matrix
 confusionMatrix(step_pred_class, test_actual, positive = "Yes")
 
 # ROC and AUC
-roc_step <- roc(ifelse(test_actual=="Yes",1,0), step_pred)
-plot(roc_step, col="steelblue", main="ROC Curve - Stepwise Logistic Regression")
-auc_step <- cat("AUC (stepwise):", round(auc(roc_step), 3), "\n")
+
+plot(roc_step, col="blue", main="ROC Curve - Stepwise Logistic Regression")
+
+auc_step <- auc(roc_step)
+cat("AUC (stepwise):", round(auc_step, 3), "\n")
 ```
 
 ```{r}
+# Variable Importance
 
 step_varimp <- varImp(step_model, scale = TRUE)
 step_varimp_df <- as.data.frame(step_varimp)
@@ -241,7 +260,7 @@ step_varimp_df %>% kable(caption = "Variable Importance - Stepwise Logistic Regr
 
 
 ggplot(step_varimp_df, aes(x = reorder(Variable, .data[[imp_col]]), y = .data[[imp_col]])) +
-  geom_col(fill = "steelblue") +
+  geom_col(fill = "green") +
   coord_flip() +
   labs(title = "Variable Importance - Stepwise Logistic Regression",
        x = "Variable",
@@ -250,22 +269,60 @@ ggplot(step_varimp_df, aes(x = reorder(Variable, .data[[imp_col]]), y = .data[[i
 ```
 
 ```{r}
+
+# Decision Tree
+
 set.seed(123)
 tree_model <- rpart(
   stroke ~ .,
-  data    = train,
+  data    = train_bal,
   method  = "class",
-  control = rpart.control(cp = 0.0001, minsplit = 5, minbucket = 2)
+  control = rpart.control(cp = 0.01, minsplit = 20, minbucket = 7)
 )
 printcp(tree_model)
 plotcp(tree_model)
 
 ```
+
+
 ```{r}
+
+cp_table <- tree_model$cptable
+min_idx   <- which.min(cp_table[,"xerror"])
+threshold <- cp_table[min_idx, "xerror"] + cp_table[min_idx, "xstd"]
+best_cp   <- cp_table[min(which(cp_table[,"xerror"] <= threshold)), "CP"]
+tree_pruned <- prune(tree_model, cp = best_cp)
+
+rpart.plot(tree_pruned, main = "Pruned decision tree")
+
+```
+```{r}
+tree_prob <- predict(tree_pruned, test, type = "prob")[, "Yes"]
+
+tree_class <- factor(ifelse(tree_prob > 0.5, "Yes", "No"), levels = c("No", "Yes"))
+
+confusionMatrix(tree_class, test_actual, positive = "Yes")
+
+
+roc_tree <- roc(test$stroke, tree_prob)
+
+best_thresh_tree <- coords(roc_tree, "best", ret = "threshold")$threshold
+
+auc_tree <- auc(roc_tree)
+cat("AUC (tree):",     round(auc_tree, 3), "\n")
+
+plot(roc_tree, col = "darkorange", main = "ROC – Decision Tree")
+
+```
+
+
+```{r}
+# Random Forest
+
 set.seed(123)
 rf_model <- randomForest(
   stroke ~ .,
-  data       = train,
+  data       = train_bal,
   ntree      = 200,
   importance = TRUE
 )
@@ -277,12 +334,12 @@ rf_pred <- predict(rf_model, newdata = test)
 rf_prob <- predict(rf_model, newdata = test, type = "prob")[,2]
 
 # Confusion Matrix
-confusionMatrix(rf_pred, test$stroke, positive = "Yes")
-confusionMatrix(factor(log_pred_class), test$stroke, positive = "Yes")
+confusionMatrix(rf_pred, test_actual, positive = "Yes")
 
 # ROC and AUC
-roc_rf <- roc(ifelse(test$stroke=="Yes",1,0), rf_prob)
+roc_rf <- roc(test$stroke, rf_prob)
 plot(roc_rf, col="darkgreen", main="ROC Curve - Random Forest")
+
 auc_rf <- auc(roc_rf)
 cat("AUC for Random Forest:", round(auc_rf,3), "\n")
 
@@ -290,26 +347,6 @@ cat("AUC for Random Forest:", round(auc_rf,3), "\n")
 varImpPlot(rf_model, main="Variable Importance - Random Forest")
 
 ```
-
-```{r}
-best_cp     <- tree_model$cptable[which.min(tree_model$cptable[, "xerror"]), "CP"]
-tree_pruned <- prune(tree_model, cp = best_cp)
-
-```
-```{r}
-tree_prob <- predict(tree_model, test, type = "prob")[, "Yes"]
-
-tree_class <- factor(ifelse(tree_prob > 0.5, "Yes", "No"), levels = c("No", "Yes"))
-
-confusionMatrix(tree_class, test_actual, positive = "Yes")
-
-
-roc_tree <- roc(test$stroke, tree_prob)
-auc_tree <- cat("AUC:", round(auc(roc_tree), 3), "\n") 
-plot(roc_tree, col = "darkorange", main = "ROC – Decision Tree")
-
-```
-
 ```{r}
 plot(roc_curve,  col = "steelblue",   lwd = 2,
      main = "ROC comparison – all models")
@@ -325,10 +362,11 @@ legend("bottomright", bty = "n",
          paste("Decision tree       AUC =", round(auc(roc_tree), 3)),
          paste("Random forest       AUC =", round(auc(roc_rf),   3))
          ),
-       col = c("steelblue","dodgerblue","darkorange","forestgreen","purple"),
+       col = c("steelblue","dodgerblue","darkorange","forestgreen"),
        lwd = 2)
 
 ```
+
 ```{r}
 model_summary <- data.frame(
   Model = c("Logistic Full", "Logistic Stepwise", "Decision Tree", "Random Forest"),
@@ -343,13 +381,12 @@ print(model_summary)
 table(stroke$stroke)
 set.seed(123)
 ```
-
-
 ```{r}
-tree.stroke <- tree(stroke ~., data = stroke)
 
-tree.stroke.train <- tree(stroke ~., data = train)
+tree.stroke.train <- tree(stroke ~ ., data = train_bal)
 
+```
+```{r}
 print("Tree Summary")
 summary(tree.stroke.train)
 
@@ -364,10 +401,39 @@ table(tree.pred, test$stroke)
 mean(tree.pred != test$stroke)
 ```
 
-
 ```{r}
 #CV pruning
 
+set.seed(123)
+cv.stroke <- cv.tree(tree.stroke.train, FUN = prune.misclass)
 
+names(cv.stroke)
+
+
+par(mfrow = c(1,2))
+plot(cv.stroke$size, cv.stroke$dev, type = "b",
+     xlab = "Tree Size", ylab = "Deviance")
+
+plot(cv.stroke$k, cv.stroke$dev, type = "b",
+     xlab = "Complexity Parameter", ylab = "Deviance")
+
+par(mfrow = c(1,1))
+best.size <- cv.stroke$size[which.min(cv.stroke$dev)]
+
+prune.stroke <- prune.misclass(tree.stroke.train, best = best.size)
+
+```
+```{r}
+plot(prune.stroke)
+text(prune.stroke, pretty = 0)
+```
+```{r}
+
+#Testing pruned tree
+
+pruned.pred <- predict(prune.stroke, test, type = "class")
+table(pruned.pred, test$stroke)
+
+mean(pruned.pred != test$stroke)
 
 ```
