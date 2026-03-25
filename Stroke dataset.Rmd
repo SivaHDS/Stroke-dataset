@@ -347,25 +347,7 @@ cat("AUC for Random Forest:", round(auc_rf,3), "\n")
 varImpPlot(rf_model, main="Variable Importance - Random Forest")
 
 ```
-```{r}
-plot(roc_curve,  col = "steelblue",   lwd = 2,
-     main = "ROC comparison – all models")
-plot(roc_step, col = "dodgerblue",  lwd = 2, lty = 2, add = TRUE)
-plot(roc_tree, col = "darkorange",  lwd = 2, add = TRUE)
-plot(roc_rf,   col = "forestgreen", lwd = 2, add = TRUE)
-abline(a = 0, b = 1, lty = 3, col = "grey60")
 
-legend("bottomright", bty = "n",
-       legend = c(
-         paste("Logistic (full)     AUC =", round(auc(roc_curve),  3)),
-         paste("Logistic (stepwise) AUC =", round(auc(roc_step), 3)),
-         paste("Decision tree       AUC =", round(auc(roc_tree), 3)),
-         paste("Random forest       AUC =", round(auc(roc_rf),   3))
-         ),
-       col = c("steelblue","dodgerblue","darkorange","forestgreen"),
-       lwd = 2)
-
-```
 
 ```{r}
 model_summary <- data.frame(
@@ -435,5 +417,132 @@ pruned.pred <- predict(prune.stroke, test, type = "class")
 table(pruned.pred, test$stroke)
 
 mean(pruned.pred != test$stroke)
+
+```
+
+```{r}
+p_vars <- ncol(train_bal) - 1
+
+set.seed(1)
+bag_model <- randomForest(stroke ~ ., data = train_bal,
+                          mtry = p_vars, importance = TRUE)
+bag_model
+
+# Predictions
+bag_pred <- predict(bag_model, newdata = test)
+bag_prob <- predict(bag_model, newdata = test, type = "prob")[, 2]
+
+# Confusion Matrix
+confusionMatrix(bag_pred, test_actual, positive = "Yes")
+
+# ROC and AUC
+roc_bag <- roc(ifelse(test_actual == "Yes", 1, 0), bag_prob)
+plot(roc_bag, col = "hotpink", main = "ROC Curve - Bagging")
+auc_bag <- auc(roc_bag)
+cat("AUC for Bagging:", round(auc_bag, 3), "\n")
+
+varImpPlot(bag_model, main = "Variable Importance - Bagging")
+
+
+```
+
+```{r}
+
+train_gbm        <- train_bal
+train_gbm$stroke <- ifelse(train_gbm$stroke == "Yes", 1, 0)
+
+set.seed(1)
+boost_model <- gbm(stroke ~ ., data = train_gbm,
+                   distribution = "bernoulli",
+                   n.trees = 5000,
+                   interaction.depth = 4,
+                   shrinkage = 0.001,
+                   cv.folds = 10,
+                   verbose = FALSE)
+
+best_iter <- gbm.perf(boost_model, method = "cv")
+cat("Best number of trees (CV):", best_iter, "\n")
+
+summary(boost_model)
+
+# Partial dependence plots for top 2 predictors
+top2 <- summary(boost_model, plotit = FALSE)$var[1:2]
+plot(boost_model, i = top2[1])
+plot(boost_model, i = top2[2])
+
+# Predictions
+boost_prob  <- predict(boost_model, newdata = test,
+                       n.trees = best_iter, type = "response")
+boost_class <- factor(ifelse(boost_prob > 0.5, "Yes", "No"),
+                      levels = c("No", "Yes"))
+
+# Confusion Matrix
+confusionMatrix(boost_class, test_actual, positive = "Yes")
+
+# ROC and AUC
+roc_boost <- roc(ifelse(test_actual == "Yes", 1, 0), boost_prob)
+plot(roc_boost, col = "purple", main = "ROC Curve - Boosting")
+cat("AUC for Boosting:", round(auc(roc_boost), 3), "\n")
+
+```
+
+```{r}
+
+# BART
+
+x_train <- model.matrix(stroke ~ . - 1, data = train)
+y_train <- as.numeric(train$stroke == "Yes")
+x_test  <- model.matrix(stroke ~ . - 1, data = test)
+
+set.seed(1)
+bartfit <- pbart(x.train = x_train,
+                 y.train = y_train,
+                 x.test  = x_test)
+
+# Posterior mean predicted probabilities
+bart_prob  <- bartfit$prob.test.mean
+bart_class <- factor(ifelse(bart_prob > 0.5, "Yes", "No"),
+                     levels = c("No", "Yes"))
+
+# Confusion Matrix
+confusionMatrix(bart_class, test_actual, positive = "Yes")
+
+# ROC and AUC
+roc_bart <- roc(ifelse(test_actual == "Yes", 1, 0), bart_prob)
+plot(roc_bart, col = "brown", main = "ROC Curve - BART")
+cat("AUC for BART:", round(auc(roc_bart), 3), "\n")
+
+# Variable inclusion counts (equivalent of variable importance)
+ord <- order(bartfit$varcount.mean, decreasing = TRUE)
+bartfit$varcount.mean[ord]
+
+```
+
+```{r}
+
+# ROC curves for all models
+plot(roc_curve,  col = "steelblue",   lwd = 2,
+     main = "ROC comparison - all models")
+plot(roc_step,   col = "dodgerblue",  lwd = 2, lty = 2, add = TRUE)
+plot(roc_tree,   col = "darkorange",  lwd = 2, add = TRUE)
+plot(roc_bag,    col = "hotpink",     lwd = 2, add = TRUE)
+plot(roc_rf,     col = "forestgreen", lwd = 2, add = TRUE)
+plot(roc_boost,  col = "purple",      lwd = 2, add = TRUE)
+plot(roc_bart,   col = "brown",       lwd = 2, add = TRUE)
+abline(a = 0, b = 1, lty = 3, col = "grey60")
+
+legend("bottomright", bty = "n",
+       legend = c(
+         paste("Logistic (full)     AUC =", round(auc(roc_curve), 3)),
+         paste("Logistic (stepwise) AUC =", round(auc(roc_step),  3)),
+         paste("Decision tree       AUC =", round(auc(roc_tree),  3)),
+         paste("Bagging             AUC =", round(auc_bag,        3)),
+         paste("Random forest       AUC =", round(auc_rf,         3)),
+         paste("Boosting            AUC =", round(auc(roc_boost), 3)),
+         paste("BART                AUC =", round(auc(roc_bart),  3))
+       ),
+       col = c("steelblue", "dodgerblue", "darkorange",
+               "hotpink", "forestgreen", "purple", "brown"),
+       lwd = 2)
 
 ```
